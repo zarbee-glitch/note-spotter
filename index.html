@@ -117,6 +117,7 @@ h2{font-size:.75rem;letter-spacing:.1em;text-transform:uppercase;color:var(--mut
   <div class="opts">
     <label><input type="checkbox" id="exactOctave" checked> Must be the written octave</label>
     <label><input type="checkbox" id="strict"> Must be in tune (within 20 cents)</label>
+    <label><input type="checkbox" id="chromatic"> Chromatic: include every sharp and flat</label>
     <label><input type="checkbox" id="showRange" checked> Show the level's range</label>
     <label><input type="checkbox" id="showFret"> Show where to play it</label>
   </div>
@@ -170,6 +171,12 @@ const sigText=s=>s===0?'no sharps or flats':Math.abs(s)+(s>0?'♯':'♭');
 const noteName=n=>letterOf(n)+ACC_TXT[keyAcc(letterOf(n))];
 const midiOf=n=>{const l=letterOf(n); return 12*(Math.floor(n/7)+1)+NAT[l]+keyAcc(l)}; // written pitch
 const soundingOf=n=>midiOf(n)-12;                                                     // guitar sounds an octave lower
+// the current note carries its own accidental, so chromatic notes can step outside the key
+const writtenMidi=(n,acc)=>12*(Math.floor(n/7)+1)+NAT[letterOf(n)]+acc;
+const targetWritten=()=>writtenMidi(S.current,S.acc);
+const targetSounding=()=>targetWritten()-12;
+const currentName=()=>letterOf(S.current)+ACC_TXT[S.acc];
+const chromaticOn=()=>document.getElementById('chromatic').checked&&!NOTE_LEVELS[S.level].fixedKey;
 
 // spell a written MIDI pitch in the current key: key notes first, then sharps or flats to suit the key
 function spell(m){
@@ -237,9 +244,10 @@ function draw(state){
   const tx=show?RIGHT-110:(LEFT+RIGHT)/2;
   const col=state==='good'?tok('--good'):tok('--brass');
   noteHead(tx,S.current,col,1,false,true);
+  if(S.acc!==keyAcc(letterOf(S.current))) accidental(tx-26,yOf(S.current-BOTTOM),S.acc,col);
   // the note you are playing, in grey beside it
   const h=S.heard;
-  if(h&&state!=='good'&&h.midi!==soundingOf(S.current)){
+  if(h&&state!=='good'&&h.midi!==targetSounding()){
     const sp=spell(h.midi+12), pos=sp.dn-BOTTOM;
     if(pos>=-12&&pos<=22){
       const gx=tx+56, ghost=tok('--ghost');
@@ -257,8 +265,19 @@ function chooseKey(){
 }
 function pick(afterWin){
   chooseKey();
-  const pool=notePool(); let n;
-  do{n=pool[Math.floor(Math.random()*pool.length)]}while(pool.length>1&&n===S.current);
+  const prev=S.current===null?null:targetWritten();
+  let opts=notePool().map(n=>({n,acc:keyAcc(letterOf(n))}));
+  if(chromaticOn()){
+    // every semitone: each line or space as natural, sharp or flat (no E♯, B♯, C♭ or F♭)
+    opts=[];
+    NOTE_LEVELS[S.level].notes.forEach(n=>{const l=letterOf(n);
+      [-1,0,1].forEach(acc=>{
+        if((acc===1&&'EB'.includes(l))||(acc===-1&&'CF'.includes(l))) return;
+        if(writtenMidi(n,acc)<52) return;
+        opts.push({n,acc});});});
+  }
+  let o; do{o=opts[Math.floor(Math.random()*opts.length)]}while(opts.length>1&&writtenMidi(o.n,o.acc)===prev);
+  const n=o.n; S.acc=o.acc;
   S.current=n; S.locked=false; S.missed=false; S.lastWrong=null; S.tuneWarned=false; S.heard=null;
   if(!afterWin) S.prevTarget=null;
   S.settleUntil=performance.now()+150;
@@ -280,7 +299,7 @@ const PRAISE=['Spot on!','Yes!','Nice playing.','Got it!','Brilliant.','Clean!']
 function fretOf(n){
   const strings=[['6th (low E)',dn('E',3)],['5th (A)',dn('A',3)],['4th (D)',dn('D',4)],['3rd (G)',dn('G',4)],['2nd (B)',dn('B',4)],['1st (high E)',dn('E',5)]];
   const m=x=>12*(Math.floor(x/7)+1)+NAT[letterOf(x)];
-  const p=midiOf(n); let best=null;
+  const p=n===S.current?targetWritten():midiOf(n); let best=null;
   for(const [nm,o] of strings){const f=p-m(o); if(f>=0&&(f<=4||nm.startsWith('1st'))) best=[nm,f];}
   if(!best) return 'on the guitar';
   return best[1]===0?`open ${best[0]} string`:`${best[0]} string, fret ${best[1]}`;
@@ -288,14 +307,14 @@ function fretOf(n){
 function win(){
   S.locked=true; S.score++; S.streak++; S.done++; if(!S.missed) S.firstTry++;
   if(S.streak>S.best){S.best=S.streak; try{localStorage.setItem('nsl-best',S.best)}catch(e){}}
-  fb(PRAISE[Math.floor(Math.random()*PRAISE.length)]+' '+noteName(S.current)+': '+fretOf(S.current)+'.','good');
+  fb(PRAISE[Math.floor(Math.random()*PRAISE.length)]+' '+currentName()+': '+fretOf(S.current)+'.','good');
   draw('good'); stats();
-  S.prevTarget=soundingOf(S.current);
+  S.prevTarget=targetSounding();
   setTimeout(()=>pick(true),180); // straight on to the next note
 }
 function wrong(midi){
   S.missed=true; S.streak=0; stats();
-  const target=soundingOf(S.current), heard=spell(midi+12).name;
+  const target=targetSounding(), heard=spell(midi+12).name;
   if(pcOf(midi)===pcOf(target)){
     const up=midi>target, oct=Math.round(Math.abs(midi-target)/12);
     fb(`Right note, wrong octave: that ${heard} is ${oct>1?oct+' octaves':'an octave'} too ${up?'high':'low'}.`,'bad');
@@ -380,7 +399,7 @@ function tick(){
   if(S.locked||now<S.settleUntil||S.current===null) return;
   if(changed) draw();
   if(cand!==near){cand=near; candSince=now; return;}
-  const held=now-candSince, target=soundingOf(S.current);
+  const held=now-candSince, target=targetSounding();
   const exact=document.getElementById('exactOctave').checked;
   const rightNote=exact?near===target:pcOf(near)===pcOf(target);
   if(rightNote&&held>=HOLD_RIGHT){
@@ -412,10 +431,10 @@ function tone(midi){
 document.getElementById('hear').onclick=()=>{
   if(S.current===null) pick();
   S.settleUntil=performance.now()+1800; // don't mark the speaker's own sound
-  tone(soundingOf(S.current));
+  tone(targetSounding());
 };
 document.getElementById('skip').onclick=()=>{
-  if(S.current!==null&&!S.locked){S.streak=0; S.done++; stats(); fb('That was '+noteName(S.current)+': '+fretOf(S.current)+'.','warn'); S.locked=true; setTimeout(pick,1300);}
+  if(S.current!==null&&!S.locked){S.streak=0; S.done++; stats(); fb('That was '+currentName()+': '+fretOf(S.current)+'.','warn'); S.locked=true; setTimeout(pick,1300);}
 };
 
 /* ---------- Controls ---------- */
@@ -443,6 +462,9 @@ function setLevel(i){
   stats(); pick();
 }
 document.getElementById('showRange').onchange=()=>draw();
+const chromBox=document.getElementById('chromatic');
+try{chromBox.checked=localStorage.getItem('nsl-chromatic')==='1'}catch(e){}
+chromBox.onchange=()=>{try{localStorage.setItem('nsl-chromatic',chromBox.checked?'1':'0')}catch(e){} S.current=null; pick();};
 document.getElementById('showFret').onchange=()=>{ if(S.current!==null&&!S.locked) fb(document.getElementById('showFret').checked?'Play it on the '+fretOf(S.current)+'.':'Play the brass note.',''); };
 matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change',()=>draw());
 
