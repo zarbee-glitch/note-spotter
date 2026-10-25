@@ -52,8 +52,12 @@ button:focus-visible,select:focus-visible{outline:3px solid var(--brass);outline
 .scale::after{content:"";position:absolute;left:50%;top:-4px;bottom:-4px;width:2px;background:var(--good)}
 .needle{position:absolute;top:2px;bottom:12px;width:4px;margin-left:-2px;border-radius:2px;background:var(--ink);left:50%;transition:left .08s linear,opacity .2s;opacity:0}
 .ticks{position:absolute;left:0;right:0;bottom:0;display:flex;justify-content:space-between;font-size:.7rem;color:var(--muted);font-variant-numeric:tabular-nums}
-.levelbar{grid-column:1/-1;height:4px;background:var(--key);border-radius:2px;overflow:hidden}
-.levelbar div{height:100%;width:0;background:var(--brass);transition:width .05s}
+.levelrow{grid-column:1/-1;display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:.8rem;color:var(--muted)}
+.levelbar{position:relative;flex:1 1 160px;height:8px;background:var(--key);border-radius:4px;overflow:hidden}
+.levelbar #levelBar{height:100%;width:0;background:var(--brass);transition:width .05s}
+.levelbar #gateMark{position:absolute;top:0;bottom:0;width:2px;background:var(--ink);opacity:.6;left:0}
+.sens{display:flex;align-items:center;gap:8px;font-weight:700}
+.sens input{accent-color:var(--brass);width:140px}
 .controls{display:flex;gap:8px;flex-wrap:wrap}
 .btn{font-family:var(--f-body);font-size:.9rem;font-weight:700;border:1.5px solid var(--brass);color:var(--ink);background:var(--brass-soft);border-radius:999px;padding:7px 16px;cursor:pointer}
 .btn.plain{background:transparent;border-color:var(--key)}
@@ -106,7 +110,10 @@ h2{font-size:.75rem;letter-spacing:.1em;text-transform:uppercase;color:var(--mut
       <div class="needle" id="needle"></div>
       <div class="ticks"><span>50¢ flat</span><span>in tune</span><span>50¢ sharp</span></div>
     </div>
-    <div class="levelbar" title="Input level"><div id="levelBar"></div></div>
+    <div class="levelrow">
+      <div class="levelbar" title="Input level: notes count once the bar passes the dark line"><div id="levelBar"></div><div id="gateMark"></div></div>
+      <label class="sens" for="sens">Mic sensitivity <input type="range" id="sens" min="1" max="10" step="1" value="6"> <span id="sensVal">6</span></label>
+    </div>
   </section>
 
   <div class="controls">
@@ -325,7 +332,17 @@ function wrong(midi){
 }
 
 /* ---------- Microphone and pitch detection ---------- */
-let actx=null, analyser=null, buf=null, stream=null, timer=null, listening=false, gate=0.012;
+let actx=null, analyser=null, buf=null, stream=null, timer=null, listening=false, gateBase=0.004, gate=0.004;
+// each step of the slider makes the app react to quieter sound; 5 is the measured room level
+const sensEl=document.getElementById('sens');
+try{const v=+localStorage.getItem('nsl-sens'); if(v>=1&&v<=10) sensEl.value=v;}catch(e){}
+function applySens(){
+  const s=+sensEl.value; document.getElementById('sensVal').textContent=s;
+  gate=Math.max(0.0008,gateBase*Math.pow(0.7,s-5));
+  document.getElementById('gateMark').style.left=levelPct(gate)+'%';
+}
+const levelPct=r=>Math.min(100,Math.sqrt(r/0.2)*100); // square root so quiet playing still shows
+sensEl.oninput=()=>{applySens(); try{localStorage.setItem('nsl-sens',sensEl.value)}catch(e){}};
 const micBtn=document.getElementById('micBtn');
 function showAlert(html){const a=document.getElementById('alert'); a.innerHTML=html; a.hidden=!html;}
 
@@ -353,7 +370,7 @@ async function startMic(){
   await new Promise(res=>{const iv=setInterval(()=>{analyser.getFloatTimeDomainData(buf); samples.push(rms(buf));
     if(performance.now()-t0>800){clearInterval(iv); res();}},40);});
   samples.sort((a,b)=>a-b);
-  gate=Math.max(0.006,(samples[Math.floor(samples.length*.8)]||0)*3);
+  gateBase=Math.max(0.003,(samples[Math.floor(samples.length*.8)]||0)*2.5); applySens();
   setHeard(null,'Listening');
   if(S.current===null) pick(); else fb('Play the brass note.','');
   timer=setInterval(tick,40);
@@ -378,7 +395,7 @@ function detectPitch(b,sr){
   for(let t=1;t<=maxLag+1;t++){run+=d[t]; c[t]=run?d[t]*t/run:1;}
   let tau=-1;
   for(let t=minLag;t<=maxLag;t++){ if(c[t]<0.12){ while(t<maxLag&&c[t+1]<c[t]) t++; tau=t; break; } }
-  if(tau<0){ let m=1,mt=-1; for(let t=minLag;t<=maxLag;t++) if(c[t]<m){m=c[t];mt=t;} if(m<0.22) tau=mt; else return null; }
+  if(tau<0){ let m=1,mt=-1; for(let t=minLag;t<=maxLag;t++) if(c[t]<m){m=c[t];mt=t;} if(m<(+sensEl.value>=7?0.3:0.22)) tau=mt; else return null; }
   const a=c[tau-1], b2=c[tau], z=c[tau+1], den=a+z-2*b2;
   return sr/(tau+(den?(a-z)/(2*den):0));
 }
@@ -388,7 +405,7 @@ const HOLD_RIGHT=160, HOLD_WRONG=420;
 function tick(){
   analyser.getFloatTimeDomainData(buf);
   const r=rms(buf);
-  document.getElementById('levelBar').style.width=Math.min(100,r/0.25*100)+'%';
+  document.getElementById('levelBar').style.width=levelPct(r)+'%';
   const now=performance.now();
   const f=r>gate?detectPitch(buf,actx.sampleRate):null;
   if(!f){ cand=null; S.prevTarget=null; if(S.heard){S.heard=null; setHeard(null,'Listening'); if(!S.locked) draw();} return; }
@@ -468,7 +485,7 @@ chromBox.onchange=()=>{try{localStorage.setItem('nsl-chromatic',chromBox.checked
 document.getElementById('showFret').onchange=()=>{ if(S.current!==null&&!S.locked) fb(document.getElementById('showFret').checked?'Play it on the '+fretOf(S.current)+'.':'Play the brass note.',''); };
 matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change',()=>draw());
 
-buildKeySelect(); buildLevels(); setLevel(S.level);
+applySens(); buildKeySelect(); buildLevels(); setLevel(S.level);
 document.fonts&&document.fonts.ready.then(()=>draw());
 </script>
 </body>
